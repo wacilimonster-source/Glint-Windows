@@ -248,6 +248,17 @@ internal static class NativeCandidateReader
         catch (Exception error) when (error is COMException or InvalidCastException) { return false; }
     }
 
+    internal static bool FocusedElementAllowsWeType32(uint processId)
+    {
+        try
+        {
+            return Client.GetFocusedElement() is { } focus &&
+                Property(focus, 30002) is int pid && (uint)pid == processId &&
+                Property(focus, 30019) is false;
+        }
+        catch (Exception error) when (error is COMException or InvalidCastException) { return false; }
+    }
+
     internal static bool TryGetSafeFocus(bool allowImeSelection, out nint foreground, out string identity, out nint focusWindow)
     {
         foreground = NativeMethods.GetForegroundWindow(); identity = ""; focusWindow = 0;

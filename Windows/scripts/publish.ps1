@@ -1,8 +1,13 @@
-param([ValidateSet('win-x64','win-arm64')][string]$Runtime = 'win-x64', [switch]$UseInstalledRuntime)
+param(
+    [ValidateSet('win-x64','win-arm64')][string]$Runtime = 'win-x64',
+    [switch]$UseInstalledRuntime,
+    [string]$OutputDirectory
+)
 $ErrorActionPreference = 'Stop'
 $windowsRoot = Split-Path $PSScriptRoot -Parent
 $projectPath = Join-Path $windowsRoot 'Glint.Windows/Glint.Windows.csproj'
-$dist = Join-Path $windowsRoot "dist/Glint-0.1.6-$Runtime"
+$dist = if ($OutputDirectory) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory) }
+    else { Join-Path $windowsRoot "dist/Glint-0.1.6-$Runtime" }
 if ($UseInstalledRuntime) {
     if ($Runtime -ne 'win-x64') { throw 'Installed runtime packaging requires this x64 host.' }
     & dotnet publish $projectPath -c Release -r $Runtime --self-contained false -p:NuGetAudit=false --source (Join-Path $env:USERPROFILE '.nuget/packages') -p:DebugType=None -o $dist --nologo
@@ -37,6 +42,17 @@ if ($LASTEXITCODE -ne 0) { throw 'Windows publish failed.' }
 Copy-Item -LiteralPath (Join-Path $windowsRoot 'README.md') -Destination (Join-Path $dist 'README.md')
 $archive = $dist + '.zip'
 Compress-Archive -Path (Join-Path $dist '*') -DestinationPath $archive -Force
+if ($Runtime -eq 'win-x64') {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [IO.Compression.ZipFile]::OpenRead($archive)
+    try {
+        foreach ($component in @('WeTypeSink.dll', 'WeTypeSink32.dll', 'WeTypeHook32.exe')) {
+            $entry = $zip.GetEntry($component)
+            if ($null -eq $entry -or $entry.Length -eq 0) { throw "Windows ZIP 缺少 $component。" }
+        }
+    }
+    finally { $zip.Dispose() }
+}
 $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
 Set-Content -LiteralPath ($archive + '.sha256') -Value ($hash + '  ' + (Split-Path $archive -Leaf)) -Encoding ascii
 Write-Output $archive

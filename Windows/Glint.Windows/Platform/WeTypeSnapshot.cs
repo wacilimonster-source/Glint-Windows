@@ -12,9 +12,9 @@ internal static class WeTypeSnapshot
     private const int Process = 4;
     private const int Thread = 8;
     private const int Tick = 12;
-    private const int Count = 16;
+    internal const int Count = 16;
     internal const int AllowTick = 20;
-    private const int Text = 24;
+    internal const int Text = 24;
 
     internal static bool TryDecode(ReadOnlySpan<byte> bytes, uint processId, uint threadId, out string text)
     {

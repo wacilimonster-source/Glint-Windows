@@ -16,13 +16,21 @@
     <DebugType>embedded</DebugType>
   </PropertyGroup>
   <Target Name="BuildWeTypeSink" BeforeTargets="BeforeBuild">
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\scripts\build-wetype-sink.ps1&quot; &quot;$(TargetDir)&quot;" />
+    <PropertyGroup>
+      <_WeTypeRuntime Condition="'$(RuntimeIdentifier)' == ''">win-x64</_WeTypeRuntime>
+      <_WeTypeRuntime Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</_WeTypeRuntime>
+    </PropertyGroup>
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\scripts\build-wetype-sink.ps1&quot; &quot;$(TargetDir).&quot; -RuntimeIdentifier &quot;$(_WeTypeRuntime)&quot;" />
   </Target>
   <Target Name="BuildHudComposition" BeforeTargets="BeforeBuild">
     <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\scripts\build-hud-composition.ps1&quot; &quot;$(TargetDir)&quot;" />
   </Target>
   <Target Name="PublishHudComposition" AfterTargets="Publish">
     <Copy SourceFiles="$(TargetDir)HudComposition.dll" DestinationFolder="$(PublishDir)" />
+  </Target>
+  <Target Name="PublishWeTypeSink" AfterTargets="Publish">
+    <Copy SourceFiles="$(TargetDir)WeTypeSink.dll" DestinationFolder="$(PublishDir)" />
+    <Copy SourceFiles="$(TargetDir)WeTypeSink32.dll;$(TargetDir)WeTypeHook32.exe" DestinationFolder="$(PublishDir)" Condition="'$(RuntimeIdentifier)' != 'win-arm64'" />
   </Target>
   <ItemGroup>
     <Reference Include="UIAutomationClient.Interop"><HintPath>Interop/UIAutomationClient.Interop.dll</HintPath><EmbedInteropTypes>true</EmbedInteropTypes></Reference>

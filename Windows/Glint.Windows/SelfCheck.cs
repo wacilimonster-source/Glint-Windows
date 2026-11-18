@@ -70,7 +70,7 @@ internal static class SelfCheck
             Platform.DoubaoCandidateBridge.Check();
             Platform.WeTypeSnapshot.Check();
             Platform.WeTypeCandidateBridge.CheckModule();
-            checks.Add(new { check = "WeType highlighted candidate snapshot", passed = true });
+            checks.Add(new { check = "WeType bridge modules and highlighted candidate snapshot", passed = true });
             using (var fixture = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!) { ArgumentList = { "--ime-fixture" }, UseShellExecute = false, CreateNoWindow = true }))
             {
                 var eventCheck = Task.Run(() => Platform.NativeCandidateReader.CheckFixtureEvent(fixture!.Id));

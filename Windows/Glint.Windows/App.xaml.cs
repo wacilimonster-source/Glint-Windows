@@ -147,6 +147,7 @@ public partial class App : Application
             _tray.Dispose();
         }
         _controller?.Dispose();
+        Platform.WeTypeCandidateBridge.Shutdown();
         _activation?.Dispose();
         _exitSignal?.Dispose();
         _instance?.Dispose();

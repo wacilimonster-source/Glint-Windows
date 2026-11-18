@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO.MemoryMappedFiles;
 using System.Runtime.InteropServices;
 using System.Windows;
+using Microsoft.Win32.SafeHandles;
 
 namespace Glint.Windows.Platform;
 
@@ -12,10 +13,18 @@ namespace Glint.Windows.Platform;
 internal static class WeTypeCandidateBridge
 {
     private const string MappingName = @"Local\Glint.WeTypeCandidate.v1";
+    private const string MappingName32 = @"Local\Glint.WeTypeCandidate.x86.v1";
     private const int HookCallWindowProcedure = 4;
     private static readonly object Gate = new();
     private static MemoryMappedFile? mapping;
     private static MemoryMappedViewAccessor? view;
+    private static MemoryMappedFile? mapping32;
+    private static MemoryMappedViewAccessor? view32;
+    private static readonly WeTypeHook32Client Hook32 = new();
+    private static readonly byte[] EmptyText32 = new byte[WeTypeSnapshot.TextCapacity * sizeof(char)];
+
+    private static bool SupportsHook32 => RuntimeInformation.ProcessArchitecture == Architecture.X64 &&
+        RuntimeInformation.OSArchitecture == Architecture.X64;
     private static nint module;
     private static nint procedure;
     private static uint armedThread;
@@ -107,10 +116,22 @@ internal static class WeTypeCandidateBridge
 
     internal static CandidateSnapshot? TryRead(Rect bounds, nint foreground, string identity, nint focusWindow)
     {
-        uint threadId = NativeMethods.GetWindowThreadProcessId(foreground, out uint processId);
-        if (threadId == 0 || processId == 0) return null;
-        if (!Fresh(processId, threadId)) Shuttle(threadId, focusWindow != 0 ? focusWindow : foreground);
-        if (!TryCopy(processId, threadId, out string text)) return null;
+        NativeMethods.GetWindowThreadProcessId(foreground, out uint processId);
+        nint target = focusWindow != 0 ? focusWindow : foreground;
+        uint threadId = NativeMethods.GetWindowThreadProcessId(target, out uint targetProcess);
+        if (threadId == 0 || processId == 0 || targetProcess != processId) return null;
+        ushort machine = ProcessMachine(processId);
+        string text;
+        if (machine == 0x014c)
+        {
+            if (!SupportsHook32 || !TryRead32(foreground, target, threadId, processId, out text)) return null;
+        }
+        else
+        {
+            if (machine != 0x8664) return null;
+            if (!Fresh(processId, threadId)) Shuttle(threadId, target);
+            if (!TryCopy(processId, threadId, out text)) return null;
+        }
         if (NativeMethods.GetForegroundWindow() != foreground) return null;
         return new CandidateSnapshot(text, bounds, foreground, 0, "微信输入法")
         {
@@ -120,13 +141,80 @@ internal static class WeTypeCandidateBridge
         };
     }
 
+    private static ushort ProcessMachine(uint processId)
+    {
+        using var process = OpenProcess(0x1000, false, processId);
+        if (process.IsInvalid || !IsWow64Process2(process, out ushort machine, out ushort native)) return 0;
+        return machine == 0 ? native : machine;
+    }
+
+    private static bool TryRead32(nint foreground, nint focusWindow, uint threadId, uint processId, out string text)
+    {
+        text = "";
+        if (NativeMethods.GetAncestor(focusWindow, 2) != foreground ||
+            !NativeCandidateReader.FocusedElementAllowsWeType32(processId) ||
+            !MatchesFocus(foreground, focusWindow, threadId)) return false;
+        // The helper also resolves the target path and validates the live window and token.
+        try
+        {
+            using var process = Process.GetProcessById((int)processId);
+            if (!process.ProcessName.Equals("WXWork", StringComparison.OrdinalIgnoreCase)) return false;
+        }
+        catch (Exception error) when (error is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception) { return false; }
+        var accessor = View(for32Bit: true);
+        if (accessor is null) return false;
+        int oldSequence = accessor.ReadInt32(0);
+        uint permit = unchecked((uint)Environment.TickCount);
+        var bytes = new byte[WeTypeSnapshot.Size];
+        accessor.Write(WeTypeSnapshot.AllowTick, permit);
+        try
+        {
+            if (!Hook32.Poll(threadId, focusWindow, processId, permit)) return false;
+            int sequence = accessor.ReadInt32(0);
+            if (sequence == oldSequence || (sequence & 1) != 0) return false;
+            if (accessor.ReadArray(0, bytes, 0, bytes.Length) != bytes.Length) return false;
+            Thread.MemoryBarrier();
+            return accessor.ReadInt32(0) == sequence && BitConverter.ToInt32(bytes, 0) == sequence &&
+                unchecked((uint)Environment.TickCount - WeTypeSnapshot.ReadTick(bytes)) <= 150 &&
+                MatchesFocus(foreground, focusWindow, threadId) &&
+                WeTypeSnapshot.TryDecode(bytes, processId, threadId, out text);
+        }
+        finally
+        {
+            accessor.Write(WeTypeSnapshot.AllowTick, 0u);
+            accessor.Write(WeTypeSnapshot.Count, 0u);
+            accessor.WriteArray(WeTypeSnapshot.Text, EmptyText32, 0, EmptyText32.Length);
+            Array.Clear(bytes);
+        }
+    }
+
+    private static bool MatchesFocus(nint foreground, nint focus, uint threadId)
+    {
+        var gui = new NativeMethods.GUITHREADINFO { size = (uint)Marshal.SizeOf<NativeMethods.GUITHREADINFO>() };
+        return NativeMethods.GetForegroundWindow() == foreground &&
+            NativeMethods.GetGUIThreadInfo(threadId, ref gui) && gui.focus == focus &&
+            (NativeMethods.GetWindowLongPtr(focus, NativeMethods.GwlStyle) & NativeMethods.EsPassword) == 0;
+    }
+
+    internal static void Shutdown() => Hook32.Dispose();
+
     internal static void CheckModule()
     {
         string path = Path.Combine(AppContext.BaseDirectory, "WeTypeSink.dll");
         if (!File.Exists(path)) throw new InvalidOperationException("缺少微信输入法桥接模块");
         nint loaded = LoadLibrary(path);
-        if (loaded == 0 || GetProcAddress(loaded, "GlintWeTypeCallWndProc") == 0)
-            throw new InvalidOperationException("微信输入法桥接模块无法加载");
+        if (loaded == 0) throw new InvalidOperationException("微信输入法桥接模块无法加载");
+        try
+        {
+            if (GetProcAddress(loaded, "GlintWeTypeCallWndProc") == 0)
+                throw new InvalidOperationException("微信输入法桥接模块缺少入口");
+        }
+        finally { _ = FreeLibrary(loaded); }
+        if (SupportsHook32)
+        {
+            using var helper = new WeTypeHook32Client();
+            helper.CheckModule();
+        }
     }
 
     private static bool Fresh(uint processId, uint threadId)
@@ -182,16 +270,19 @@ internal static class WeTypeCandidateBridge
         return procedure != 0;
     }
 
-    private static MemoryMappedViewAccessor? View()
+    private static MemoryMappedViewAccessor? View(bool for32Bit = false)
     {
         lock (Gate)
         {
-            if (view is not null) return view;
+            ref var accessor = ref (for32Bit ? ref view32 : ref view);
+            ref var file = ref (for32Bit ? ref mapping32 : ref mapping);
+            if (accessor is not null) return accessor;
             try
             {
-                mapping = MemoryMappedFile.CreateOrOpen(MappingName, 512, MemoryMappedFileAccess.ReadWrite);
-                view = mapping.CreateViewAccessor(0, 512, MemoryMappedFileAccess.ReadWrite);
-                return view;
+                int size = for32Bit ? WeTypeSnapshot.Size : 512;
+                file ??= MemoryMappedFile.CreateOrOpen(for32Bit ? MappingName32 : MappingName, size, MemoryMappedFileAccess.ReadWrite);
+                accessor = file.CreateViewAccessor(0, size, MemoryMappedFileAccess.ReadWrite);
+                return accessor;
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException)
             {
@@ -201,6 +292,9 @@ internal static class WeTypeCandidateBridge
     }
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern nint LoadLibrary(string path);
+    [DllImport("kernel32.dll")] private static extern bool FreeLibrary(nint module);
+    [DllImport("kernel32.dll")] private static extern SafeProcessHandle OpenProcess(uint access, bool inherit, uint processId);
+    [DllImport("kernel32.dll")] private static extern bool IsWow64Process2(SafeProcessHandle process, out ushort machine, out ushort native);
     [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)] private static extern nint GetProcAddress(nint module, string name);
     [DllImport("user32.dll", SetLastError = true)] private static extern nint SetWindowsHookEx(int idHook, nint procedure, nint module, uint threadId);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool UnhookWindowsHookEx(nint hook);

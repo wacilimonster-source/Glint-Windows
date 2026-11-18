@@ -178,9 +178,21 @@ dotnet build Windows/scripts/WeTypeAccessibilityProbe/WeTypeAccessibilityProbe.c
 
 微信输入法 3.0.2.22 不把候选项放进 UIA 或 MSAA 树，候选窗 `WeType.NativeCandidate.Direct2D.v2` 只有根节点。候选数据在**正在输入的那个界面线程**的 TSF 里：`TF_GetThreadMgr` 取得的 `ITfUIElementMgr` 能枚举到描述为「微信输入法输入候选窗口」的 `ITfCandidateListUIElement`，`GetSelection` 和 `GetString` 给出当前高亮。这个接口标记为 `[local]`，别的进程不能直接调用。
 
-Glint 只在看见 `wetype_renderer` 的候选窗、并且前台不是密码框、终端或高权限窗口时，才把 `WeTypeSink.dll` 短暂挂到该界面线程的窗口过程。记事本这类 WinUI 文本控件经常对不上辅助功能里的窗口祖先，因此候选窗已经出现时改为认前台线程自己的焦点窗口。钩子只处理用来进入线程的 `WM_NULL`，随即卸下；不监听键盘。线程内只读取当前高亮的那一项，写入当前用户会话的内存映射 `Local\Glint.WeTypeCandidate.v1`，不落盘、不读取输入框正文。候选元素还在时，同一线程用 10ms 定时器继续刷新；候选结束后清空文字并停止。32 位目标进程无法加载这份 64 位模块。
+Glint 只在看见 `wetype_renderer` 的候选窗、并且前台不是密码框、终端或高权限窗口时，才把 `WeTypeSink.dll` 短暂挂到 64 位界面线程的窗口过程。前台窗口和编辑焦点可以在同一进程的不同线程上。Glint 通过 `GetGUIThreadInfo` 找到焦点窗口，向它发送用于采样的 `WM_NULL`，并在拥有它的线程上装钩子和查询快照。线程内读取当前高亮的那一项，写入当前用户会话的内存映射 `Local\Glint.WeTypeCandidate.v1`。卸下钩子后，同一线程用 10ms 定时器继续刷新；候选结束后清空文字并停止。
 
 2026-11-14 独立进程验证：一个 WinForms 文本框用 `TF_IPPMF_FORPROCESS` 启用微信输入法，输入 `nihao` 后按两次右方向键。另一进程只通过上述桥接读到高亮依次为「你好」「👋」「拟好」。译文栏仍要求候选含中文，因此纯表情高亮不会出译文。快照解码和桥接模块加载已进入 Windows 自检。
+
+### Windows x64 上的 32 位企业微信
+
+2026-11-18 在企业微信 5.0.8.6009、微信输入法 3.0.2.44 上运行结构探针。聊天候选可见时，前台窗口和焦点窗口均为 `0x2F91BC8`，PID 63612、线程 57588，`IsWow64Process2` 返回 x86（`0x014C`）。焦点属于企业微信主进程，根窗口等于前台窗口，候选窗 PID 为 10408。另一次采样看到 `updated_web` 的 64 位子进程获得焦点，该时刻候选窗不可见。
+
+同机复测公开接口采到 33 次候选窗。UIA 和 MSAA 都只返回根节点，未提供候选子项或文字范围。
+
+64 位 Glint 按目标进程位数选择桥接。32 位路径仅接受系统标准安装目录中的企业微信主进程，要求焦点窗口属于其前台窗口，目标是同用户同会话内的普通权限进程，并根据 UIA 密码属性和原生窗口样式跳过密码框。Glint 按需启动并复用 x86 的 `WeTypeHook32.exe`。辅助进程连接到限制为当前用户的专用管道，双方验证对端的进程与会话。辅助进程用 `WeTypeSink32.dll` 在目标线程同步采样一次，再卸下钩子。两种架构使用相同的 264 字节布局，x86 写入 `Local\Glint.WeTypeCandidate.x86.v1`，每次取样结束后清空槽内文字。候选文字由 sink 通过 TSF 获取，辅助进程只回传操作状态。两条路径都不监听键盘、不读输入框正文、不落盘。[Windows 窗口钩子的位数要求](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowshookexw)
+
+用 `.\Windows\scripts\wetype-wxwork-focus-probe.ps1 -Seconds 90` 复查焦点归属。自检验证 x86 辅助进程能加载 x86 DLL、回报架构并拒绝无效窗口。真机验收时，用微信输入法在企业微信聊天输入框输入 `nihao` 并停留，检查译文显示。用方向键切换到另一条中文候选，检查译文跟随。用空格提交、Esc 取消、点击输入框外或切换输入法，分别检查译文栏消失。再检查密码框和终端不显示译文栏，最后在 64 位记事本重复候选显示、切换与取消。
+
+2026-11-18 真机验收通过企业微信的候选显示、方向键切换及上述四种结束操作，Windows 终端和 WinForms 密码框未显示译文。64 位记事本回归发现前台窗口与编辑焦点的线程分别为 30508 和 36080，均属于 PID 48984。改用实际焦点线程后，确认快照由 36080 写入，记事本和企业微信均能显示译文并在 Esc 后收起。
 
 ## 豆包输入法
 

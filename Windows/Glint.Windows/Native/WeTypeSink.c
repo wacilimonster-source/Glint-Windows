@@ -5,11 +5,17 @@
 #include <oleauto.h>
 #include <wchar.h>
 
-#define WETYPE_MAP_NAME L"Local\\Glint.WeTypeCandidate.v1"
 #define WETYPE_TEXT_CAPACITY 120
+#ifdef _WIN64
+#define WETYPE_MAP_NAME L"Local\\Glint.WeTypeCandidate.v1"
 #define WETYPE_POLL_MS 10
 #define WETYPE_IDLE_TICKS 48
 #define WETYPE_QUIET_TICKS 80
+#else
+#define WETYPE_MAP_NAME L"Local\\Glint.WeTypeCandidate.x86.v1"
+#define WETYPE_MESSAGE_TAG 0x474C3332u
+#pragma comment(linker, "/EXPORT:GlintWeTypeCallWndProc=_GlintWeTypeCallWndProc@12")
+#endif
 
 typedef struct Snapshot {
     volatile LONG sequence;
@@ -17,9 +23,10 @@ typedef struct Snapshot {
     DWORD threadId;
     DWORD tick;
     DWORD charCount;
-    DWORD allowTick;
+    volatile DWORD allowTick;
     wchar_t text[WETYPE_TEXT_CAPACITY];
 } Snapshot;
+typedef char SnapshotLayout[(sizeof(Snapshot) == 264) ? 1 : -1];
 
 typedef struct WeTypeUnknown WeTypeUnknown;
 typedef struct WeTypeUnknownVtbl {
@@ -75,6 +82,7 @@ typedef struct WeTypeEnumVtbl {
     HRESULT (STDMETHODCALLTYPE *Skip)(WeTypeEnum *self, ULONG count);
 } WeTypeEnumVtbl;
 
+#ifdef _WIN64
 typedef struct ThreadState {
     UINT_PTR timer;
     int inside;
@@ -83,9 +91,10 @@ typedef struct ThreadState {
 } ThreadState;
 
 static DWORD tlsIndex = TLS_OUT_OF_INDEXES;
+static void TimerBody(ThreadState *state);
+#endif
 static const GUID IID_ITfUIElementMgr = {0xea1ea135, 0x19df, 0x11d7, {0xa6, 0xd2, 0x00, 0x06, 0x5b, 0x84, 0x43, 0x5c}};
 static const GUID IID_ITfCandidateList = {0xea1ea138, 0x19df, 0x11d7, {0xa6, 0xd2, 0x00, 0x06, 0x5b, 0x84, 0x43, 0x5c}};
-static void TimerBody(ThreadState *state);
 
 static BOOL Allowed(const Snapshot *snapshot) {
     DWORD now = GetTickCount();
@@ -118,13 +127,12 @@ static void CloseSnapshot(HANDLE handle, Snapshot *snapshot) {
     if (handle) CloseHandle(handle);
 }
 
-static void WriteText(const wchar_t *text) {
-    HANDLE handle = NULL;
-    Snapshot *snapshot = OpenSnapshot(&handle);
+static void Publish(Snapshot *snapshot, const wchar_t *text, DWORD permit) {
+    LONG sequence = snapshot->sequence;
     size_t count = 0;
-    if (!snapshot) return;
+    if (permit && snapshot->allowTick != permit) return;
+    if ((sequence & 1) || InterlockedCompareExchange(&snapshot->sequence, sequence | 1, sequence) != sequence) return;
     if (text) count = wcsnlen(text, WETYPE_TEXT_CAPACITY - 1);
-    InterlockedIncrement(&snapshot->sequence);
     MemoryBarrier();
     snapshot->processId = GetCurrentProcessId();
     snapshot->threadId = GetCurrentThreadId();
@@ -133,9 +141,22 @@ static void WriteText(const wchar_t *text) {
     if (count) memcpy(snapshot->text, text, count * sizeof(wchar_t));
     snapshot->text[count] = L'\0';
     MemoryBarrier();
+    if (permit && snapshot->allowTick != permit) {
+        snapshot->charCount = 0;
+        SecureZeroMemory(snapshot->text, sizeof(snapshot->text));
+    }
     InterlockedIncrement(&snapshot->sequence);
+}
+
+#ifdef _WIN64
+static void WriteText(const wchar_t *text) {
+    HANDLE handle = NULL;
+    Snapshot *snapshot = OpenSnapshot(&handle);
+    if (!snapshot) return;
+    Publish(snapshot, text, 0);
     CloseSnapshot(handle, snapshot);
 }
+#endif
 
 static BOOL ReadSelected(wchar_t *text, size_t capacity) {
     HMODULE msctf;
@@ -191,6 +212,7 @@ static BOOL ReadSelected(wchar_t *text, size_t capacity) {
     return found;
 }
 
+#ifdef _WIN64
 static ThreadState *CurrentState(BOOL create) {
     ThreadState *state;
     if (tlsIndex == TLS_OUT_OF_INDEXES) return NULL;
@@ -250,11 +272,36 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     else if (reason == DLL_PROCESS_DETACH && tlsIndex != TLS_OUT_OF_INDEXES) TlsFree(tlsIndex);
     return TRUE;
 }
+#else
+static void ReadFocused(HWND hwnd, DWORD permit) {
+    HANDLE handle = NULL;
+    Snapshot *snapshot = OpenSnapshot(&handle);
+    wchar_t text[WETYPE_TEXT_CAPACITY];
+    if (!snapshot) return;
+    if (permit && snapshot->allowTick == permit && hwnd == GetFocus() && Allowed(snapshot)) {
+        BOOL found = ReadSelected(text, WETYPE_TEXT_CAPACITY);
+        if (snapshot->allowTick == permit && hwnd == GetFocus() && Allowed(snapshot))
+            Publish(snapshot, found ? text : NULL, permit);
+        SecureZeroMemory(text, sizeof(text));
+    }
+    CloseSnapshot(handle, snapshot);
+}
+#endif
 
-__declspec(dllexport) LRESULT CALLBACK GlintWeTypeCallWndProc(int code, WPARAM wParam, LPARAM lParam) {
+#ifdef _WIN64
+__declspec(dllexport)
+#endif
+LRESULT CALLBACK GlintWeTypeCallWndProc(int code, WPARAM wParam, LPARAM lParam) {
     if (code == HC_ACTION) {
         const CWPSTRUCT *message = (const CWPSTRUCT *)lParam;
-        if (message && message->message == WM_NULL) Ensure();
+        if (message && message->message == WM_NULL) {
+#ifdef _WIN64
+            Ensure();
+#else
+            // A single synchronous sample keeps every native callback within the hook lifetime.
+            if (message->wParam == WETYPE_MESSAGE_TAG) ReadFocused(message->hwnd, (DWORD)message->lParam);
+#endif
+        }
     }
     return CallNextHookEx(NULL, code, wParam, lParam);
 }

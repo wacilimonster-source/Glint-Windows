@@ -264,7 +264,7 @@ public partial class MainWindow : Window
         var content = Page();
         content.Children.Add(Card("候选读取", Rows(
             Info("微软拼音", "优先适配", "通过 Windows 输入法候选可访问性接口，读取当前高亮候选。"),
-            Info("微信输入法", "读取当前高亮", "在 64 位普通窗口中读取微信输入法当前高亮的候选。32 位程序暂不支持。"),
+            Info("微信输入法", "读取当前高亮", "适用于 64 位普通窗口。32 位兼容路径仅用于默认位置安装的企业微信。"),
             Info("其他输入法", "按兼容性支持", "搜狗、小狼毫等输入法需要提供标准候选结构；无法确认高亮候选时，Glint 不会显示译文。"))));
         var test = new StackPanel();
         test.Children.Add(Text("检查输入法是否可用", 14, FontWeights.Medium));
